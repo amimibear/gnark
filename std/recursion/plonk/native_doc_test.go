@@ -110,6 +110,8 @@ func Example_native() {
 		ecc.BLS12_377.ScalarField(), ecc.BW6_761.ScalarField(),
 	)
 
+	fmt.Println("1")
+	
 	// initialize the witness elements
 	circuitVk, err := plonk.ValueOfVerifyingKey[sw_bls12377.ScalarField, sw_bls12377.G1Affine, sw_bls12377.G2Affine](innerVK)
 	if err != nil {
