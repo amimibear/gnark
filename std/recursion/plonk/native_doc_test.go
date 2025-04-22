@@ -1,14 +1,107 @@
 package plonk_test
 
 import (
+	// "github.com/consensys/gnark-crypto/ecc"
+	// native_plonk "github.com/consensys/gnark/backend/plonk"
+	// "github.com/consensys/gnark/frontend"
+	// "github.com/consensys/gnark/frontend/cs/scs"
+	"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
+	// "github.com/consensys/gnark/std/recursion/plonk"
+	// "github.com/consensys/gnark/test/unsafekzg"
+
+	"fmt"
+	"math/big"
 	"github.com/consensys/gnark-crypto/ecc"
 	native_plonk "github.com/consensys/gnark/backend/plonk"
+	"github.com/consensys/gnark/backend/witness"
+	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/scs"
-	"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
+	"github.com/consensys/gnark/std/algebra"
+	// "github.com/consensys/gnark/std/algebra/emulated/sw_bw6761"
+	"github.com/consensys/gnark/std/math/emulated"
 	"github.com/consensys/gnark/std/recursion/plonk"
 	"github.com/consensys/gnark/test/unsafekzg"
 )
+
+// InnerCircuitNative is the definition of the inner circuit we want to
+// recursively verify inside an outer circuit. The circuit proves the knowledge
+// of a factorisation of a semiprime.
+type InnerCircuitNative struct {
+	P, Q frontend.Variable
+	N    frontend.Variable `gnark:",public"`
+}
+
+func (c *InnerCircuitNative) Define(api frontend.API) error {
+	// prove that P*Q == N
+	res := api.Mul(c.P, c.Q)
+	api.AssertIsEqual(res, c.N)
+	// we must also enforce that P != 1 and Q != 1
+	api.AssertIsDifferent(c.P, 1)
+	api.AssertIsDifferent(c.Q, 1)
+	return nil
+}
+
+// computeInnerProof computes the proof for the inner circuit we want to verify
+// recursively. In this example the PLONK keys are generated on the fly, but
+// in practice should be generated once and using MPC.
+func computeInnerProof(field, outer *big.Int) (constraint.ConstraintSystem, native_plonk.VerifyingKey, witness.Witness, native_plonk.Proof) {
+	innerCcs, err := frontend.Compile(field, scs.NewBuilder, &InnerCircuitNative{})
+	if err != nil {
+		panic(err)
+	}
+	// NB! UNSAFE! Use MPC.
+	srs, srsLagrange, err := unsafekzg.NewSRS(innerCcs)
+	if err != nil {
+		panic(err)
+	}
+
+	innerPK, innerVK, err := native_plonk.Setup(innerCcs, srs, srsLagrange)
+	if err != nil {
+		panic(err)
+	}
+
+	// inner proof
+	innerAssignment := &InnerCircuitNative{
+		P: 3,
+		Q: 5,
+		N: 15,
+	}
+	innerWitness, err := frontend.NewWitness(innerAssignment, field)
+	if err != nil {
+		panic(err)
+	}
+	innerProof, err := native_plonk.Prove(innerCcs, innerPK, innerWitness, plonk.GetNativeProverOptions(outer, field))
+	if err != nil {
+		panic(err)
+	}
+	innerPubWitness, err := innerWitness.Public()
+	if err != nil {
+		panic(err)
+	}
+	err = native_plonk.Verify(innerProof, innerVK, innerPubWitness, plonk.GetNativeVerifierOptions(outer, field))
+	if err != nil {
+		panic(err)
+	}
+	return innerCcs, innerVK, innerPubWitness, innerProof
+}
+
+// OuterCircuit is the generic outer circuit which can verify PLONK proofs
+// using field emulation or 2-chains of curves.
+type OuterCircuit[FR emulated.FieldParams, G1El algebra.G1ElementT, G2El algebra.G2ElementT, GtEl algebra.GtElementT] struct {
+	Proof        plonk.Proof[FR, G1El, G2El]
+	VerifyingKey plonk.VerifyingKey[FR, G1El, G2El] `gnark:"-"` // constant verification key
+	InnerWitness plonk.Witness[FR]                  `gnark:",public"`
+}
+
+func (c *OuterCircuit[FR, G1El, G2El, GtEl]) Define(api frontend.API) error {
+	verifier, err := plonk.NewVerifier[FR, G1El, G2El, GtEl](api)
+	if err != nil {
+		return fmt.Errorf("new verifier: %w", err)
+	}
+	err = verifier.AssertProof(c.VerifyingKey, c.Proof, c.InnerWitness)
+	return err
+}
 
 // Example of verifying recursively BLS12-377 PLONK proof in BW6-761 PLONK circuit using field emulation
 func Example_native() {
@@ -81,4 +174,6 @@ func Example_native() {
 	if err != nil {
 		panic("circuit verification failed: " + err.Error())
 	}
+
+	// Output: 
 }
